@@ -39,13 +39,53 @@
       <div style="text-align:center">
         <div style="font-size:48px;margin-bottom:16px;animation:pulse 1.5s ease-in-out infinite">📈</div>
         <div style="font-size:18px;font-weight:600">PortfolioTracker</div>
-        <div style="font-size:13px;color:#64748b;margin-top:8px">Wird geladen...</div>
+        <div style="font-size:13px;color:#64748b;margin-top:8px" id="boot-status">Wird geladen...</div>
       </div>
     </div>
   </div>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script>
+    // Lade-Absicherung: React von jsdelivr, bei Fehler Fallback auf unpkg
+    function loadScript(src, fallbackSrc) {
+      return new Promise(function(resolve, reject) {
+        var s = document.createElement('script');
+        s.src = src;
+        s.crossOrigin = 'anonymous';
+        s.onload = resolve;
+        s.onerror = function() {
+          if (fallbackSrc) {
+            var s2 = document.createElement('script');
+            s2.src = fallbackSrc;
+            s2.crossOrigin = 'anonymous';
+            s2.onload = resolve;
+            s2.onerror = reject;
+            document.head.appendChild(s2);
+          } else { reject(); }
+        };
+        document.head.appendChild(s);
+      });
+    }
+    (async function() {
+      var bs = document.getElementById('boot-status');
+      try {
+        if (bs) bs.textContent = 'React laden...';
+        await loadScript(
+          'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js',
+          'https://unpkg.com/react@18/umd/react.production.min.js'
+        );
+        await loadScript(
+          'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js',
+          'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js'
+        );
+        if (bs) bs.textContent = 'App starten...';
+        window.__startApp();
+      } catch (e) {
+        if (bs) bs.innerHTML = 'Fehler beim Laden der Bibliotheken.<br>Bitte Seite neu laden.';
+        console.error('Script load failed:', e);
+      }
+    })();
+  </script>
+  <script>
+window.__startApp = function() {
 const {
   useState,
   useEffect,
@@ -94,7 +134,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18b";
+const APP_VERSION = "2026-06-18c";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -7098,6 +7138,7 @@ function PortfolioApp() {
 // ─── Mount App ───
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(/*#__PURE__*/React.createElement(PortfolioApp, null));
+}; // end __startApp
   </script>
 </body>
 </html>
