@@ -134,7 +134,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18c";
+const APP_VERSION = "2026-06-18d";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -884,6 +884,16 @@ const SECURITY_LOOKUP = [
   isin: "CA45828F1018",
   ticker: "Y4G.F",
   name: "Integrated Cyber Solutions Inc."
+}, {
+  wkn: "A4DFTR",
+  isin: "NO0013536169",
+  ticker: "A4DFTR.F",
+  name: "Homann Holzwerkstoffe 7,50% 25/32"
+}, {
+  wkn: "A2N4PB",
+  isin: "US62914V1061",
+  ticker: "N3IA.F",
+  name: "NIO Inc. ADR"
 }];
 function lookupSecurity(query) {
   if (!query || query.trim().length === 0) return [];
@@ -2721,6 +2731,36 @@ const MOCK_QUOTES = {
     pe: null,
     dividend: 0,
     sector: "Technologie",
+    currency: "EUR",
+    type: "stock"
+  },
+  "A4DFTR.F": {
+    name: "Homann Holzwerkstoffe 7,50% 25/32",
+    price: 100.50,
+    change: -0.50,
+    changePct: -0.50,
+    prev: 101.00,
+    high: 101.25,
+    low: 100.50,
+    volume: 20000,
+    pe: null,
+    dividend: 7.50,
+    sector: "Unternehmensanleihe",
+    currency: "EUR",
+    type: "bond"
+  },
+  "N3IA.F": {
+    name: "NIO Inc. ADR",
+    price: 4.485,
+    change: -0.025,
+    changePct: -0.55,
+    prev: 4.510,
+    high: 4.520,
+    low: 4.450,
+    volume: 850000,
+    pe: null,
+    dividend: 0,
+    sector: "Automobil",
     currency: "EUR",
     type: "stock"
   }
