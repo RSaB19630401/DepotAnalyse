@@ -146,7 +146,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18g";
+const APP_VERSION = "2026-06-18h";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -4173,70 +4173,96 @@ function PortfolioApp() {
     const [buyCurrency, setBuyCurrency] = useState("EUR");
     const [isSearchingOnline, setIsSearchingOnline] = useState(false);
     const [onlineResults, setOnlineResults] = useState([]);
+    const [searchNotes, setSearchNotes] = useState([]);
     const searchTimer = React.useRef(null);
+    const runOnlineSearch = async (query) => {
+      setIsSearchingOnline(true);
+      setSearchNotes([]);
+      try {
+        const resp = await fetch(`${WORKER_URL}/api/search?q=${encodeURIComponent(query.trim())}`, {
+          signal: AbortSignal.timeout(15000)
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          setOnlineResults((data.results || []).map(r => ({
+            ...r,
+            wkn: r.wkn || (data.kind === "wkn" ? query.trim().toUpperCase() : "–"),
+            isin: r.isin || "–",
+            _online: true
+          })));
+          setSearchNotes(data.notes || []);
+        } else {
+          setSearchNotes(["Die Suche ist fehlgeschlagen. Bitte später erneut versuchen."]);
+        }
+      } catch (e) {
+        console.warn("Online search failed:", e.message);
+        setSearchNotes(["Keine Verbindung zur Suche. Bitte Internetverbindung prüfen."]);
+      }
+      setIsSearchingOnline(false);
+    };
+
     const handleSearch = query => {
       setSearchQuery(query);
       setSelectedSecurity(null);
       setTicker("");
       setOnlineResults([]);
+      setSearchNotes([]);
       if (query.trim().length >= 2) {
         const results = lookupSecurity(query);
         setSearchResults(results);
-        // If no local results, search online after 600ms debounce
+        // Wenn lokal nichts gefunden → automatisch online suchen (nach 700ms Tipppause)
         if (results.length === 0 && query.trim().length >= 3) {
           clearTimeout(searchTimer.current);
-          searchTimer.current = setTimeout(async () => {
-            setIsSearchingOnline(true);
-            try {
-              const resp = await fetch(`${WORKER_URL}/api/search?q=${encodeURIComponent(query.trim())}`, {
-                signal: AbortSignal.timeout(8000)
-              });
-              if (resp.ok) {
-                const data = await resp.json();
-                setOnlineResults((data.results || []).map(r => ({
-                  ...r, wkn: query.trim().toUpperCase(), isin: "", _online: true
-                })));
-              }
-            } catch (e) { console.warn("Online search failed:", e.message); }
-            setIsSearchingOnline(false);
-          }, 600);
+          searchTimer.current = setTimeout(() => runOnlineSearch(query), 700);
         }
       } else {
         setSearchResults([]);
       }
     };
     const selectSecurity = sec => {
-      // If from online search, register in app
+      // Aus Online-Suche → dauerhaft in der App registrieren
       if (sec._online) {
-        const entry = { wkn: sec.wkn || "–", isin: sec.isin || "–", ticker: sec.ticker, name: sec.name };
+        const entry = {
+          wkn: sec.wkn && sec.wkn !== "–" ? sec.wkn : "–",
+          isin: sec.isin && sec.isin !== "–" ? sec.isin : "–",
+          ticker: sec.ticker,
+          name: sec.name
+        };
         if (!SECURITY_LOOKUP.find(s => s.ticker === sec.ticker)) {
           SECURITY_LOOKUP.push(entry);
         }
         if (!MOCK_QUOTES[sec.ticker]) {
           MOCK_QUOTES[sec.ticker] = {
-            name: sec.name, price: sec.price || 0, change: sec.change || 0,
-            changePct: sec.changePct || 0, prev: sec.prev || sec.price || 0,
-            high: sec.high || sec.price || 0, low: sec.low || sec.price || 0,
-            volume: sec.volume || 0, pe: null,
+            name: sec.name,
+            price: sec.price || 0,
+            change: sec.change || 0,
+            changePct: sec.changePct || 0,
+            prev: sec.prev || sec.price || 0,
+            high: sec.high || sec.price || 0,
+            low: sec.low || sec.price || 0,
+            volume: sec.volume || 0,
+            pe: null,
             dividend: sec.dividend?.annualDiv || 0,
-            sector: "Benutzerdefiniert", currency: sec.currency || "EUR",
+            sector: sec.exchangeDisplay ? `Online (${sec.exchangeDisplay})` : "Online hinzugefügt",
+            currency: sec.currency || "EUR",
             type: sec.type || "stock"
           };
         }
-        // Save custom securities to localStorage for persistence
+        // Dauerhaft speichern (Bugfix: vorher wurde auf s.ticker statt s.lookup.ticker geprüft)
         try {
           const saved = JSON.parse(localStorage.getItem("pt_custom-securities") || "[]");
-          if (!saved.find(s => s.ticker === sec.ticker)) {
+          if (!saved.find(s => s.lookup?.ticker === sec.ticker)) {
             saved.push({ lookup: entry, quote: MOCK_QUOTES[sec.ticker] });
             localStorage.setItem("pt_custom-securities", JSON.stringify(saved));
           }
-        } catch(e) {}
+        } catch (e) { console.warn("Konnte Wertpapier nicht speichern:", e); }
       }
       setSelectedSecurity(sec);
       setTicker(sec.ticker);
       setSearchQuery("");
       setSearchResults([]);
       setOnlineResults([]);
+      setSearchNotes([]);
       const q = MOCK_QUOTES[sec.ticker];
       if (q) {
         setPrice(q.price.toString());
@@ -4370,9 +4396,12 @@ function PortfolioApp() {
           setSearchQuery("");
         }
       },
-      placeholder: "z.B. 716460, DE0007164600, SAP, Apple...",
+      placeholder: "z.B. DE0007164600, SAP, Apple, NIO...",
       autoFocus: true
-    }), selectedSecurity && lookupInfo && /*#__PURE__*/React.createElement("div", {
+    }), !selectedSecurity && /*#__PURE__*/React.createElement("div", {
+      style: { fontSize: "11px", color: "#64748b", marginTop: "4px", lineHeight: 1.5 }
+    }, "Unbekannte Werte werden automatisch online gesucht. Am besten funktioniert die ISIN oder der Firmenname."),
+    selectedSecurity && lookupInfo && /*#__PURE__*/React.createElement("div", {
       style: {
         marginTop: "8px",
         padding: "10px 14px",
@@ -4506,20 +4535,39 @@ function PortfolioApp() {
       onMouseEnter: e => e.currentTarget.style.background = "#334155",
       onMouseLeave: e => e.currentTarget.style.background = "transparent",
       onClick: () => selectSecurity(r)
-    }, /*#__PURE__*/React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+    }, /*#__PURE__*/React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" } },
       /*#__PURE__*/React.createElement("div", null,
         /*#__PURE__*/React.createElement("div", { style: { fontWeight: 600, fontSize: "13px", color: "#f1f5f9" } }, r.name),
         /*#__PURE__*/React.createElement("div", { style: { fontSize: "11px", color: "#64748b" } },
-          r.ticker, " \u00B7 ", r.exchangeDisplay || r.exchange, " \u00B7 ", r.currency)),
-      /*#__PURE__*/React.createElement("div", { style: { textAlign: "right" } },
+          r.ticker, " \u00B7 ", r.exchangeDisplay || r.exchange || "?", " \u00B7 ", r.currency,
+          r.isin && r.isin !== "\u2013" ? ` \u00B7 ${r.isin}` : "")),
+      /*#__PURE__*/React.createElement("div", { style: { textAlign: "right", whiteSpace: "nowrap" } },
         r.price && /*#__PURE__*/React.createElement("div", { style: { fontSize: "13px", fontWeight: 600, color: "#f1f5f9" } },
           fmtCur(r.price, r.currency)),
         /*#__PURE__*/React.createElement("span", {
           style: { fontSize: "10px", padding: "2px 6px", borderRadius: "4px", background: "#10b98120", color: "#34d399" }
         }, "\uD83C\uDF10 Online")))))),
     !isSearchingOnline && onlineResults.length === 0 && searchQuery.length >= 3 && /*#__PURE__*/React.createElement("div", {
-      style: { padding: "16px", textAlign: "center", color: "#64748b", fontSize: "13px" }
-    }, "Kein Wertpapier gefunden f\xFCr \u201E", searchQuery, "\u201C")
+      style: { padding: "14px 16px" }
+    },
+      /*#__PURE__*/React.createElement("div", {
+        style: { color: "#94a3b8", fontSize: "13px", marginBottom: searchNotes.length ? "8px" : "10px", textAlign: "center" }
+      }, "Kein Wertpapier gefunden f\u00FCr \u201E", searchQuery, "\u201C"),
+      searchNotes.length > 0 && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: "12px", color: "#fbbf24", lineHeight: 1.6, marginBottom: "10px",
+          background: "#f59e0b12", border: "1px solid #f59e0b30", borderRadius: "8px", padding: "10px 12px"
+        }
+      }, searchNotes.map((n, i) => /*#__PURE__*/React.createElement("div", { key: i }, "\uD83D\uDCA1 ", n))),
+      /*#__PURE__*/React.createElement("button", {
+        style: { ...S.btn("primary"), width: "100%", padding: "8px", fontSize: "13px" },
+        onClick: () => runOnlineSearch(searchQuery)
+      }, "\uD83C\uDF10 Erneut online suchen"),
+      /*#__PURE__*/React.createElement("div", {
+        style: { fontSize: "11px", color: "#64748b", marginTop: "10px", lineHeight: 1.6, textAlign: "center" }
+      }, "Tipp: Am zuverl\u00E4ssigsten funktioniert die ", /*#__PURE__*/React.createElement("strong", { style: { color: "#94a3b8" } }, "ISIN"),
+         " (12 Zeichen, z.B. DE0007164600) oder der ", /*#__PURE__*/React.createElement("strong", { style: { color: "#94a3b8" } }, "Firmenname"), ".")
+    )
     ), searchMode === "dropdown" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
       style: labelStyle
     }, "Wertpapier aus Liste w\xE4hlen"), /*#__PURE__*/React.createElement("select", {
