@@ -146,7 +146,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18f";
+const APP_VERSION = "2026-06-18g";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -3205,7 +3205,10 @@ function PortfolioApp() {
                 sector: mock.sector || liveData.exchange || "Sonstige",
                 pe: mock.pe,
                 dividend: liveData.dividend?.annualDiv || mock.dividend || 0,
-                marketState: liveData.marketState
+                nominal: mock.nominal,
+                marketState: liveData.marketState,
+                dataQuality: "live",
+                priceAsOf: new Date().toISOString()
               };
               h[ticker] = liveData.history?.length > 5 ? liveData.history : generateHistory(liveData.price);
             });
@@ -3232,7 +3235,10 @@ function PortfolioApp() {
               type: liveData.type || mock.type || "stock",
               sector: mock.sector || "Sonstige",
               pe: mock.pe,
-              dividend: liveData.dividend?.annualDiv || mock.dividend || 0
+              dividend: liveData.dividend?.annualDiv || mock.dividend || 0,
+              nominal: mock.nominal,
+              dataQuality: "cache",
+              priceAsOf: new Date(cached._ts).toISOString()
             };
             h[ticker] = liveData.history?.length > 5 ? liveData.history : generateHistory(liveData.price);
           });
@@ -3240,16 +3246,25 @@ function PortfolioApp() {
       }
     }
 
-    // Phase 2: Fill ALL remaining tickers from mock (instant, no API)
-    setLoadStatus("Mock-Daten laden...");
-    console.timeLog("loadData total", "live fetch done, filling mock");
+    // Phase 2: Fill remaining tickers from mock — klar als "nicht live" markiert
+    setLoadStatus("Restliche Kurse laden...");
+    // Manuell gepflegte Kurse laden (haben Vorrang vor Mock-Daten)
+    const manualPrices = await Storage.get("portfolio-manual-prices") || {};
     Object.keys(MOCK_QUOTES).forEach(t => {
       if (!q[t]) {
+        const manual = manualPrices[t];
+        const basePrice = manual?.price ?? MOCK_QUOTES[t].price;
         q[t] = {
           ...MOCK_QUOTES[t],
-          ticker: t
+          ticker: t,
+          price: basePrice,
+          prev: basePrice,
+          change: 0,
+          changePct: 0,
+          dataQuality: manual ? "manual" : "mock",
+          priceAsOf: manual?.updatedAt || null
         };
-        h[t] = generateHistory(MOCK_QUOTES[t].price);
+        h[t] = generateHistory(basePrice);
       }
     });
     setQuotes(q);
@@ -3258,11 +3273,28 @@ function PortfolioApp() {
 
     // Generate recommendations
     setLoadStatus("Analyse berechnen...");
-    console.timeLog("loadData total", "starting recommendations");
     const recs = [];
     Object.entries(q).forEach(([ticker, quote]) => {
       const hist = h[ticker];
       if (!hist || hist.length < 14) return;
+      // Technische Signale nur bei ECHTEN Kursdaten (live/cache).
+      // Bei Mock/manuellen Kursen ist die History zufallsgeneriert → Signale wären sinnlos.
+      const hasRealHistory = quote.dataQuality === "live" || quote.dataQuality === "cache";
+      if (!hasRealHistory) {
+        recs.push({
+          ticker,
+          ...quote,
+          rsi: null,
+          macd: null,
+          sma20: null,
+          sma50: null,
+          signal: "Keine Analyse",
+          icon: "—",
+          color: "#64748b",
+          noSignal: true
+        });
+        return;
+      }
       const closes = hist.map(d => d.close);
       const rsi = computeRSI(closes);
       const macd = closes.length >= 26 ? computeMACD(closes) : 0;
@@ -3614,6 +3646,34 @@ function PortfolioApp() {
   }, [portfolioMetrics, quotes, allocationTotal]);
 
   // Klumpenrisiko warnings
+  // Datenqualität im Depot: welche Positionen haben keine echten Kurse?
+  const dataQualityInfo = useMemo(() => {
+    const stale = [];
+    let staleValueEUR = 0;
+    portfolioMetrics.positions.forEach(p => {
+      const q = quotes[p.ticker];
+      if (!q) return;
+      if (q.dataQuality === "mock" || q.dataQuality === "manual") {
+        stale.push({
+          ticker: p.ticker,
+          name: q.name,
+          quality: q.dataQuality,
+          priceAsOf: q.priceAsOf,
+          valueEUR: p.valueEUR || 0
+        });
+        staleValueEUR += p.valueEUR || 0;
+      }
+    });
+    const totalValue = portfolioMetrics.totalValue || 0;
+    return {
+      stale: stale.sort((a, b) => b.valueEUR - a.valueEUR),
+      staleCount: stale.length,
+      staleValueEUR,
+      stalePct: totalValue > 0 ? (staleValueEUR / totalValue) * 100 : 0,
+      mockCount: stale.filter(s => s.quality === "mock").length
+    };
+  }, [portfolioMetrics, quotes]);
+
   const riskWarnings = useMemo(() => {
     const warnings = [];
     sectorAllocation.forEach(s => {
@@ -3869,6 +3929,29 @@ function PortfolioApp() {
       }]);
     }
   };
+  // Manuellen Kurs setzen (für Wertpapiere ohne Live-Daten)
+  const setManualPrice = useCallback(async (ticker, newPrice) => {
+    const price = parseFloat(String(newPrice).replace(",", "."));
+    if (!price || price <= 0) return false;
+    const stored = await Storage.get("portfolio-manual-prices") || {};
+    stored[ticker] = { price, updatedAt: new Date().toISOString() };
+    await Storage.set("portfolio-manual-prices", stored);
+    // Quote sofort aktualisieren
+    setQuotes(prev => ({
+      ...prev,
+      [ticker]: {
+        ...prev[ticker],
+        price,
+        prev: price,
+        change: 0,
+        changePct: 0,
+        dataQuality: "manual",
+        priceAsOf: new Date().toISOString()
+      }
+    }));
+    return true;
+  }, []);
+
   const removePosition = ticker => {
     setPortfolio(prev => prev.filter(p => p.ticker !== ticker));
   };
@@ -4644,6 +4727,33 @@ function PortfolioApp() {
   }
 
   // ─── Sortable Table Header ───
+  // ─── Datenqualitäts-Kennzeichnung ───
+  const QUALITY_INFO = {
+    live: { icon: "🟢", label: "Live", color: "#34d399", desc: "Aktueller Börsenkurs von Yahoo Finance" },
+    cache: { icon: "🟡", label: "Cache", color: "#fbbf24", desc: "Zwischengespeicherter Kurs (Verbindung fehlgeschlagen)" },
+    manual: { icon: "✏️", label: "Manuell", color: "#818cf8", desc: "Von dir manuell gepflegter Kurs" },
+    mock: { icon: "⚠️", label: "Kein Live-Kurs", color: "#f87171", desc: "Kein Börsenkurs verfügbar – Platzhalterwert! Bitte manuell pflegen." }
+  };
+
+  function QualityBadge({ quality, priceAsOf, compact }) {
+    const info = QUALITY_INFO[quality] || QUALITY_INFO.mock;
+    const ageText = priceAsOf ? `\nStand: ${new Date(priceAsOf).toLocaleString("de-DE")}` : "";
+    if (compact) {
+      return /*#__PURE__*/React.createElement("span", {
+        style: { fontSize: "10px", cursor: "help" },
+        title: info.desc + ageText
+      }, info.icon);
+    }
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: "10px", padding: "2px 6px", borderRadius: "4px",
+        background: info.color + "20", color: info.color,
+        border: `1px solid ${info.color}40`, cursor: "help", whiteSpace: "nowrap"
+      },
+      title: info.desc + ageText
+    }, info.icon, " ", info.label);
+  }
+
   function SortHead({
     label,
     field,
@@ -4860,7 +4970,52 @@ function PortfolioApp() {
     }).length, " im Plus \xB7", " ", portfolio.filter(p => {
       const q = quotes[p.ticker];
       return q && q.price < p.avgPrice;
-    }).length, " im Minus"))), /*#__PURE__*/React.createElement("div", {
+    }).length, " im Minus"))),
+    dataQualityInfo.staleCount > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        ...S.card,
+        marginBottom: "20px",
+        borderLeft: `3px solid ${dataQualityInfo.mockCount > 0 ? "#f87171" : "#818cf8"}`,
+        background: dataQualityInfo.mockCount > 0 ? "#ef444408" : "#818cf808"
+      }
+    },
+      /*#__PURE__*/React.createElement("div", {
+        style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }
+      },
+        /*#__PURE__*/React.createElement("div", null,
+          /*#__PURE__*/React.createElement("div", {
+            style: { fontSize: "14px", fontWeight: 600, color: dataQualityInfo.mockCount > 0 ? "#f87171" : "#818cf8", marginBottom: "4px" }
+          }, dataQualityInfo.mockCount > 0 ? "⚠️ Kursdaten unvollständig" : "✏️ Manuell gepflegte Kurse"),
+          /*#__PURE__*/React.createElement("div", {
+            style: { fontSize: "13px", color: "#94a3b8", lineHeight: 1.6 }
+          },
+            dataQualityInfo.staleCount, " von ", portfolio.length, " Positionen ohne Live-Kurs",
+            " (", fmtEUR(dataQualityInfo.staleValueEUR), " = ", dataQualityInfo.stalePct.toFixed(0), "% des Depots).",
+            dataQualityInfo.mockCount > 0
+              ? " Diese Werte sind Platzhalter und nicht real – bitte im Depot-Tab manuell pflegen."
+              : " Diese Kurse hast du selbst eingetragen."
+          )
+        ),
+        /*#__PURE__*/React.createElement("button", {
+          style: { ...S.btn("ghost"), padding: "6px 14px", fontSize: "12px", whiteSpace: "nowrap" },
+          onClick: () => setTab("portfolio")
+        }, "Zum Depot →")
+      ),
+      /*#__PURE__*/React.createElement("div", {
+        style: { display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }
+      }, dataQualityInfo.stale.slice(0, 8).map(s =>
+        /*#__PURE__*/React.createElement("span", {
+          key: s.ticker,
+          style: {
+            fontSize: "11px", padding: "3px 8px", borderRadius: "6px",
+            background: "#0f172a", color: "#94a3b8", border: "1px solid #1e293b"
+          }
+        }, QUALITY_INFO[s.quality]?.icon, " ", s.name)
+      ), dataQualityInfo.stale.length > 8 && /*#__PURE__*/React.createElement("span", {
+        style: { fontSize: "11px", color: "#64748b", padding: "3px 4px" }
+      }, "+", dataQualityInfo.stale.length - 8, " weitere"))
+    ),
+    /*#__PURE__*/React.createElement("div", {
       style: {
         display: "grid",
         gridTemplateColumns: "1fr 420px",
@@ -4994,7 +5149,11 @@ function PortfolioApp() {
           fontWeight: 600,
           fontVariantNumeric: "tabular-nums"
         }
-      }, fmtPrice(q?.price, q)), /*#__PURE__*/React.createElement("td", {
+      }, fmtPrice(q?.price, q), " ", /*#__PURE__*/React.createElement(QualityBadge, {
+        quality: q?.dataQuality,
+        priceAsOf: q?.priceAsOf,
+        compact: true
+      })), /*#__PURE__*/React.createElement("td", {
         style: S.td
       }, /*#__PURE__*/React.createElement(Sparkline, {
         data: sparkData,
@@ -5091,7 +5250,11 @@ function PortfolioApp() {
       }
     }, rec.ticker, " \xB7 ", fmtCur(rec.price, rec.currency))), /*#__PURE__*/React.createElement("span", {
       style: S.badge(rec.color)
-    }, rec.icon, " ", rec.signal)), /*#__PURE__*/React.createElement("div", {
+    }, rec.icon, " ", rec.signal)), rec.noSignal
+      ? /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: "11px", color: "#64748b", fontStyle: "italic" }
+        }, "Kein Live-Kurs \u2013 keine technische Analyse m\u00F6glich")
+      : /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: "16px",
@@ -5106,7 +5269,7 @@ function PortfolioApp() {
       style: {
         color: rec.macd > 0 ? "#34d399" : "#f87171"
       }
-    }, rec.macd > 0 ? "+" : "", rec.macd.toFixed(3))), /*#__PURE__*/React.createElement("span", null, "SMA20: ", fmt(rec.sma20)))))))), /*#__PURE__*/React.createElement("div", {
+    }, rec.macd > 0 ? "+" : "", (rec.macd ?? 0).toFixed(3))), /*#__PURE__*/React.createElement("span", null, "SMA20: ", fmt(rec.sma20)))))))), /*#__PURE__*/React.createElement("div", {
       style: {
         ...S.card,
         marginTop: "20px"
@@ -5493,7 +5656,26 @@ function PortfolioApp() {
           marginTop: "4px",
           fontVariantNumeric: "tabular-nums"
         }
-      }, fmtPrice(pos.avgPrice, q), " \u2192 ", fmtPrice(q?.price, q))), /*#__PURE__*/React.createElement("div", {
+      }, fmtPrice(pos.avgPrice, q), " \u2192 ", fmtPrice(q?.price, q)),
+      /*#__PURE__*/React.createElement("div", {
+        style: { marginTop: "6px", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }
+      }, /*#__PURE__*/React.createElement(QualityBadge, {
+        quality: q?.dataQuality,
+        priceAsOf: q?.priceAsOf
+      }), (q?.dataQuality === "mock" || q?.dataQuality === "manual") && /*#__PURE__*/React.createElement("button", {
+        style: {
+          fontSize: "10px", padding: "2px 8px", borderRadius: "5px", cursor: "pointer",
+          background: "#1e293b", color: "#94a3b8", border: "1px solid #334155", fontFamily: "inherit"
+        },
+        onClick: () => {
+          const eingabe = prompt(
+            `Aktuellen Kurs für ${q?.name} eintragen:\n\n` +
+            (isPercentQuoted(q) ? "(Anleihe – Kurs in % vom Nennwert)" : `(Kurs in ${q?.currency || "EUR"})`),
+            String(q?.price || "").replace(".", ",")
+          );
+          if (eingabe !== null) setManualPrice(pos.ticker, eingabe);
+        }
+      }, "Kurs pflegen"))), /*#__PURE__*/React.createElement("div", {
         style: {
           textAlign: "center"
         }
@@ -5724,7 +5906,12 @@ function PortfolioApp() {
           color: "#94a3b8",
           lineHeight: 1.8
         }
-      }, /*#__PURE__*/React.createElement("div", null, "RSI: ", /*#__PURE__*/React.createElement("strong", {
+      }, rec.noSignal
+        ? /*#__PURE__*/React.createElement("div", {
+            style: { fontSize: "11px", color: "#64748b", fontStyle: "italic", lineHeight: 1.5 }
+          }, "\u26A0\uFE0F Kein Live-Kurs", /*#__PURE__*/React.createElement("br", null), "Keine Analyse m\u00F6glich")
+        : /*#__PURE__*/React.createElement(React.Fragment, null,
+      /*#__PURE__*/React.createElement("div", null, "RSI: ", /*#__PURE__*/React.createElement("strong", {
         style: {
           color: rec.rsi < 30 ? "#34d399" : rec.rsi > 70 ? "#f87171" : "#f59e0b"
         }
@@ -5732,7 +5919,7 @@ function PortfolioApp() {
         style: {
           color: rec.macd > 0 ? "#34d399" : "#f87171"
         }
-      }, rec.macd > 0 ? "+" : "", rec.macd.toFixed(3))), /*#__PURE__*/React.createElement("div", null, "SMA20/50: ", fmt(rec.sma20), " / ", fmt(rec.sma50))), /*#__PURE__*/React.createElement("div", {
+      }, rec.macd > 0 ? "+" : "", (rec.macd ?? 0).toFixed(3))), /*#__PURE__*/React.createElement("div", null, "SMA20/50: ", fmt(rec.sma20), " / ", fmt(rec.sma50)))), /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           gap: "6px"
