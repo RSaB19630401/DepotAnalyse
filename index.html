@@ -128,13 +128,25 @@ let liveFxRates = {
   ...FX_RATES
 }; // updated from API if available
 const toEUR = (amount, currency) => amount * (liveFxRates[currency] || FX_RATES[currency] || 1);
+
+// ─── Anleihen-Bewertung ───
+// Echte Anleihen notieren in % vom Nennwert → Wert = Stück × (Kurs%/100) × Nennwert
+// Anleihen-ETFs/Fonds notieren dagegen in EUR pro Anteil → normale Berechnung
+// Unterscheidung: nur Einträge MIT explizitem "nominal" werden als Prozent-Notiz behandelt
+const isPercentQuoted = (quote) => !!(quote && quote.type === "bond" && quote.nominal);
+const positionValue = (shares, price, quote) => {
+  if (isPercentQuoted(quote)) {
+    return shares * (price / 100) * quote.nominal;
+  }
+  return shares * price;
+};
 const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
   style: "currency",
   currency: "EUR"
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18d";
+const APP_VERSION = "2026-06-18e";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -1766,6 +1778,7 @@ const MOCK_QUOTES = {
     dividend: 3.10,
     sector: "Unternehmensanleihe",
     currency: "EUR",
+    nominal: 1000,
     type: "bond"
   },
   "A3510K.DE": {
@@ -1781,6 +1794,7 @@ const MOCK_QUOTES = {
     dividend: 7.50,
     sector: "Unternehmensanleihe",
     currency: "EUR",
+    nominal: 1000,
     type: "bond"
   },
   "DRO.AX": {
@@ -2262,6 +2276,7 @@ const MOCK_QUOTES = {
     dividend: 3.25,
     sector: "Unternehmensanleihe",
     currency: "EUR",
+    nominal: 1000,
     type: "bond"
   },
   "849105.DE": {
@@ -2307,6 +2322,7 @@ const MOCK_QUOTES = {
     dividend: 4.625,
     sector: "Unternehmensanleihe",
     currency: "EUR",
+    nominal: 1000,
     type: "bond"
   },
   "XD9U.DE": {
@@ -2747,6 +2763,7 @@ const MOCK_QUOTES = {
     dividend: 7.50,
     sector: "Unternehmensanleihe",
     currency: "EUR",
+    nominal: 1000,
     type: "bond"
   },
   "N3IA.F": {
@@ -3038,6 +3055,12 @@ const fmtCur = (n, cur = "EUR") => n != null ? n.toLocaleString("de-DE", {
   style: "currency",
   currency: cur
 }) : "–";
+// Kurs-Formatierung: Anleihen in % vom Nennwert, alles andere in Währung
+const fmtPrice = (n, quote) => {
+  if (n == null) return "–";
+  if (isPercentQuoted(quote)) return n.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 3 }) + " %";
+  return fmtCur(n, quote?.currency || "EUR");
+};
 const fmtPct = n => n != null ? (n >= 0 ? "+" : "") + n.toFixed(2) + "%" : "–";
 const typeLabel = {
   stock: "Aktie",
@@ -3417,11 +3440,14 @@ function PortfolioApp() {
         dayChangeEUR: 0
       };
       const cur = q.currency || "EUR";
-      const value = pos.shares * q.price;
-      const cost = pos.shares * pos.avgPrice;
+      // Anleihen (%-notiert): echter Wert = Stück × Kurs% × Nennwert / 100
+      const value = positionValue(pos.shares, q.price, q);
+      const cost = positionValue(pos.shares, pos.avgPrice, q);
       const gain = value - cost;
       const gainPct = cost > 0 ? gain / cost * 100 : 0;
-      const dayChange = pos.shares * q.change;
+      const dayChange = isPercentQuoted(q)
+        ? pos.shares * (q.change / 100) * q.nominal
+        : pos.shares * q.change;
       // EUR-converted values for totals
       const valueEUR = toEUR(value, cur);
       const costEUR = toEUR(cost, cur);
@@ -3480,14 +3506,21 @@ function PortfolioApp() {
     const positions = portfolioMetrics.positions.map(pos => {
       const q = quotes[pos.ticker];
       if (!q || !q.dividend || q.dividend <= 0) return null;
-      const annualDiv = pos.shares * q.dividend;
+      const isBond = isPercentQuoted(q);
+      // Anleihen: dividend = Kupon in % → Zins p.a. = Stück × Kupon% × Nennwert / 100
+      // Aktien: dividend = EUR/Stück → Dividende p.a. = Stück × Dividende
+      const annualDiv = isBond
+        ? pos.shares * (q.dividend / 100) * q.nominal
+        : pos.shares * q.dividend;
       const annualDivEUR = toEUR(annualDiv, q.currency || "EUR");
+      // Rendite: bei Anleihen Kupon/Kurs (beide in %), bei Aktien Dividende/Kurs
       const yieldPct = q.price > 0 ? q.dividend / q.price * 100 : 0;
       totalDivEUR += annualDivEUR;
       const hv = HV_DATES[pos.ticker];
       return {
         ...pos,
         divPerShare: q.dividend,
+        isBond,
         annualDiv,
         annualDivEUR,
         yieldPct,
@@ -4131,7 +4164,9 @@ function PortfolioApp() {
             dividend: 0,
             sector: "Benutzerdefiniert",
             currency: buyCurrency,
-            type: manualType
+            type: manualType,
+            // Anleihen notieren in % vom Nennwert (Standard-Stückelung 1.000)
+            ...(manualType === "bond" ? { nominal: 1000 } : {})
           };
         }
         addPosition(customTicker, +shares, +price, date, buyCurrency);
@@ -4928,13 +4963,13 @@ function PortfolioApp() {
           ...S.td,
           fontVariantNumeric: "tabular-nums"
         }
-      }, fmtCur(pos.avgPrice, q?.currency)), /*#__PURE__*/React.createElement("td", {
+      }, fmtPrice(pos.avgPrice, q)), /*#__PURE__*/React.createElement("td", {
         style: {
           ...S.td,
           fontWeight: 600,
           fontVariantNumeric: "tabular-nums"
         }
-      }, fmtCur(q?.price, q?.currency)), /*#__PURE__*/React.createElement("td", {
+      }, fmtPrice(q?.price, q)), /*#__PURE__*/React.createElement("td", {
         style: S.td
       }, /*#__PURE__*/React.createElement(Sparkline, {
         data: sparkData,
@@ -5433,7 +5468,7 @@ function PortfolioApp() {
           marginTop: "4px",
           fontVariantNumeric: "tabular-nums"
         }
-      }, fmtCur(pos.avgPrice, q?.currency), " \u2192 ", fmtCur(q?.price, q?.currency))), /*#__PURE__*/React.createElement("div", {
+      }, fmtPrice(pos.avgPrice, q), " \u2192 ", fmtPrice(q?.price, q))), /*#__PURE__*/React.createElement("div", {
         style: {
           textAlign: "center"
         }
@@ -6089,7 +6124,7 @@ function PortfolioApp() {
       }
     }, /*#__PURE__*/React.createElement("table", {
       style: S.table
-    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["Wertpapier", "Sektor", "Stk.", "Div./Aktie", "Jahres-Div.", "Jahres-Div. (€)", "Rendite"].map(h => /*#__PURE__*/React.createElement("th", {
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["Wertpapier", "Sektor", "Stk.", "Div./Kupon", "Jahres-Ertrag", "Jahres-Ertrag (€)", "Rendite"].map(h => /*#__PURE__*/React.createElement("th", {
       key: h,
       style: S.th
     }, h)))), /*#__PURE__*/React.createElement("tbody", null, dividendMetrics.positions.map(pos => /*#__PURE__*/React.createElement("tr", {
@@ -6122,7 +6157,7 @@ function PortfolioApp() {
         ...S.td,
         fontVariantNumeric: "tabular-nums"
       }
-    }, fmtCur(pos.divPerShare, pos.currency)), /*#__PURE__*/React.createElement("td", {
+    }, pos.isBond ? `${fmt(pos.divPerShare)} %` : fmtCur(pos.divPerShare, pos.currency)), /*#__PURE__*/React.createElement("td", {
       style: {
         ...S.td,
         fontVariantNumeric: "tabular-nums",
