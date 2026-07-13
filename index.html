@@ -146,7 +146,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18h";
+const APP_VERSION = "2026-06-18i";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -2797,70 +2797,281 @@ function generateHistory(basePrice, days = 90) {
   }
   return data;
 }
+// ═══════════════════════════════════════════════════════════
+// TECHNISCHE INDIKATOREN
+// Hinweis: Technische Analyse ist wissenschaftlich umstritten.
+// Die Mehrheit der Studien findet keine verlässliche Überrendite.
+// Diese Werte sind Orientierungshilfen, keine Prognosen.
+// ═══════════════════════════════════════════════════════════
+
+// RSI nach Wilder (geglätteter Durchschnitt — so rechnen auch Broker)
+// Zahlen-Formatierung (als function deklariert → wird gehoisted, damit
+// die Indikator-Funktionen weiter unten sie schon nutzen können)
+function fmt(n, dec = 2) {
+  return n != null ? n.toLocaleString("de-DE", {
+    minimumFractionDigits: dec,
+    maximumFractionDigits: dec
+  }) : "–";
+}
+
 function computeRSI(prices, period = 14) {
-  if (prices.length < period + 1) return 50;
-  let gains = 0,
-    losses = 0;
-  for (let i = prices.length - period; i < prices.length; i++) {
+  if (!prices || prices.length < period + 1) return null;
+  // Initialer Durchschnitt über die ersten `period` Änderungen
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
     const diff = prices[i] - prices[i - 1];
-    if (diff > 0) gains += diff;else losses -= diff;
+    if (diff > 0) avgGain += diff; else avgLoss -= diff;
   }
-  const avgGain = gains / period,
-    avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
+  avgGain /= period;
+  avgLoss /= period;
+  // Wilder-Glättung über die restliche Historie
+  for (let i = period + 1; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
   const rs = avgGain / avgLoss;
   return +(100 - 100 / (1 + rs)).toFixed(1);
 }
+
 function computeSMA(prices, period) {
-  if (prices.length < period) return prices[prices.length - 1];
+  if (!prices || prices.length < period) return null;
   return +(prices.slice(-period).reduce((a, b) => a + b, 0) / period).toFixed(2);
 }
-function computeMACD(prices) {
-  const ema12 = computeEMA(prices, 12);
-  const ema26 = computeEMA(prices, 26);
-  return +(ema12 - ema26).toFixed(3);
-}
-function computeEMA(prices, period) {
-  if (prices.length < period) return prices[prices.length - 1];
+
+// EMA als Reihe (wird für MACD-Signallinie gebraucht)
+function computeEMASeries(prices, period) {
+  if (!prices || prices.length < period) return [];
   const k = 2 / (period + 1);
+  const series = [];
   let ema = prices.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  series.push(ema);
   for (let i = period; i < prices.length; i++) {
     ema = prices[i] * k + ema * (1 - k);
+    series.push(ema);
   }
-  return ema;
+  return series;
 }
-function getSignal(rsi, macd, sma20, sma50, currentPrice) {
-  let score = 0;
-  if (rsi < 30) score += 2;else if (rsi < 40) score += 1;else if (rsi > 70) score -= 2;else if (rsi > 60) score -= 1;
-  if (macd > 0) score += 1;else score -= 1;
-  if (currentPrice > sma20) score += 1;else score -= 1;
-  if (sma20 > sma50) score += 1;else score -= 1;
-  if (score >= 3) return {
-    signal: "Stark Kaufen",
-    color: "#10b981",
-    icon: "▲▲"
-  };
-  if (score >= 1) return {
-    signal: "Kaufen",
-    color: "#34d399",
-    icon: "▲"
-  };
-  if (score <= -3) return {
-    signal: "Stark Verkaufen",
-    color: "#ef4444",
-    icon: "▼▼"
-  };
-  if (score <= -1) return {
-    signal: "Verkaufen",
-    color: "#f87171",
-    icon: "▼"
-  };
+
+function computeEMA(prices, period) {
+  const s = computeEMASeries(prices, period);
+  return s.length ? s[s.length - 1] : null;
+}
+
+// Vollständiger MACD: Linie, Signallinie (EMA9), Histogramm
+function computeMACD(prices) {
+  if (!prices || prices.length < 35) return null; // 26 + 9 für Signallinie
+  const ema12 = computeEMASeries(prices, 12);
+  const ema26 = computeEMASeries(prices, 26);
+  if (!ema12.length || !ema26.length) return null;
+  // Reihen auf gleiche Länge bringen (ema26 startet später)
+  const offset = ema12.length - ema26.length;
+  const macdLine = ema26.map((v26, i) => ema12[i + offset] - v26);
+  if (macdLine.length < 9) return null;
+  const signalSeries = computeEMASeries(macdLine, 9);
+  const macd = macdLine[macdLine.length - 1];
+  const signal = signalSeries[signalSeries.length - 1];
+  const histogram = macd - signal;
+  // Kreuzung erkennen: hat das Histogramm gerade das Vorzeichen gewechselt?
+  const prevHist = macdLine.length > 1 && signalSeries.length > 1
+    ? macdLine[macdLine.length - 2] - signalSeries[signalSeries.length - 2]
+    : histogram;
+  let cross = null;
+  if (prevHist <= 0 && histogram > 0) cross = "bullish";
+  else if (prevHist >= 0 && histogram < 0) cross = "bearish";
   return {
-    signal: "Halten",
-    color: "#f59e0b",
-    icon: "●"
+    macd: +macd.toFixed(3),
+    signal: +signal.toFixed(3),
+    histogram: +histogram.toFixed(3),
+    cross
   };
 }
+
+// Bollinger-Bänder (Volatilitätsmaß)
+function computeBollinger(prices, period = 20, mult = 2) {
+  if (!prices || prices.length < period) return null;
+  const slice = prices.slice(-period);
+  const mid = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((s, p) => s + Math.pow(p - mid, 2), 0) / period;
+  const sd = Math.sqrt(variance);
+  const upper = mid + mult * sd;
+  const lower = mid - mult * sd;
+  const last = prices[prices.length - 1];
+  // %B: wo liegt der Kurs im Band? 0 = unteres Band, 1 = oberes Band
+  const pctB = upper !== lower ? (last - lower) / (upper - lower) : 0.5;
+  // Bandbreite als Volatilitätsmaß
+  const width = mid > 0 ? ((upper - lower) / mid) * 100 : 0;
+  return {
+    upper: +upper.toFixed(2),
+    mid: +mid.toFixed(2),
+    lower: +lower.toFixed(2),
+    pctB: +pctB.toFixed(2),
+    width: +width.toFixed(1)
+  };
+}
+
+// Historische Volatilität (annualisiert, in %)
+function computeVolatility(prices, period = 30) {
+  if (!prices || prices.length < period + 1) return null;
+  const returns = [];
+  for (let i = prices.length - period; i < prices.length; i++) {
+    if (prices[i - 1] > 0) returns.push(Math.log(prices[i] / prices[i - 1]));
+  }
+  if (returns.length < 2) return null;
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance = returns.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / (returns.length - 1);
+  // annualisiert: √252 Handelstage
+  return +(Math.sqrt(variance) * Math.sqrt(252) * 100).toFixed(1);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BEWERTUNG: Technik + Fundamental + Position
+// ═══════════════════════════════════════════════════════════
+
+// Technischer Score mit nachvollziehbaren Begründungen
+function scoreTechnical(ind, price) {
+  let score = 0;
+  const reasons = [];
+  if (!ind) return { score: 0, reasons: [], available: false };
+
+  // RSI: Überkauft/Überverkauft (Gewicht 2 — stärkstes Einzelsignal)
+  if (ind.rsi != null) {
+    if (ind.rsi < 30) { score += 2; reasons.push({ t: "+", txt: `RSI ${ind.rsi} — überverkauft` }); }
+    else if (ind.rsi < 40) { score += 1; reasons.push({ t: "+", txt: `RSI ${ind.rsi} — schwaches Momentum` }); }
+    else if (ind.rsi > 70) { score -= 2; reasons.push({ t: "-", txt: `RSI ${ind.rsi} — überkauft` }); }
+    else if (ind.rsi > 60) { score -= 1; reasons.push({ t: "-", txt: `RSI ${ind.rsi} — erhöhtes Momentum` }); }
+    else reasons.push({ t: "0", txt: `RSI ${ind.rsi} — neutral` });
+  }
+
+  // MACD: Kreuzung ist das eigentliche Signal (Gewicht 2), Lage nur schwach (1)
+  if (ind.macdObj) {
+    const m = ind.macdObj;
+    if (m.cross === "bullish") { score += 2; reasons.push({ t: "+", txt: "MACD kreuzt Signallinie nach oben" }); }
+    else if (m.cross === "bearish") { score -= 2; reasons.push({ t: "-", txt: "MACD kreuzt Signallinie nach unten" }); }
+    else if (m.histogram > 0) { score += 1; reasons.push({ t: "+", txt: "MACD über Signallinie" }); }
+    else { score -= 1; reasons.push({ t: "-", txt: "MACD unter Signallinie" }); }
+  }
+
+  // Trend: Kurs vs. SMA20 und SMA20 vs. SMA50
+  if (ind.sma20 != null && price) {
+    if (price > ind.sma20) { score += 1; reasons.push({ t: "+", txt: "Kurs über 20-Tage-Schnitt" }); }
+    else { score -= 1; reasons.push({ t: "-", txt: "Kurs unter 20-Tage-Schnitt" }); }
+  }
+  if (ind.sma20 != null && ind.sma50 != null) {
+    if (ind.sma20 > ind.sma50) { score += 1; reasons.push({ t: "+", txt: "Kurzfristiger Trend über langfristigem" }); }
+    else { score -= 1; reasons.push({ t: "-", txt: "Kurzfristiger Trend unter langfristigem" }); }
+  }
+
+  // Bollinger: Extremwerte
+  if (ind.bollinger) {
+    if (ind.bollinger.pctB < 0.05) { score += 1; reasons.push({ t: "+", txt: "Kurs am unteren Bollinger-Band" }); }
+    else if (ind.bollinger.pctB > 0.95) { score -= 1; reasons.push({ t: "-", txt: "Kurs am oberen Bollinger-Band" }); }
+  }
+
+  return { score, reasons, available: true };
+}
+
+// Fundamentaler Score: KGV und Dividendenrendite
+function scoreFundamental(quote) {
+  let score = 0;
+  const reasons = [];
+  let available = false;
+
+  if (quote?.pe != null && quote.pe > 0) {
+    available = true;
+    if (quote.pe < 12) { score += 2; reasons.push({ t: "+", txt: `KGV ${fmt(quote.pe)} — niedrig bewertet` }); }
+    else if (quote.pe < 20) { score += 1; reasons.push({ t: "+", txt: `KGV ${fmt(quote.pe)} — moderat bewertet` }); }
+    else if (quote.pe > 50) { score -= 2; reasons.push({ t: "-", txt: `KGV ${fmt(quote.pe)} — sehr hoch bewertet` }); }
+    else if (quote.pe > 30) { score -= 1; reasons.push({ t: "-", txt: `KGV ${fmt(quote.pe)} — hoch bewertet` }); }
+    else reasons.push({ t: "0", txt: `KGV ${fmt(quote.pe)} — durchschnittlich` });
+  }
+
+  if (quote?.dividend > 0 && quote?.price > 0) {
+    available = true;
+    const y = (quote.dividend / quote.price) * 100;
+    if (y >= 4) { score += 1; reasons.push({ t: "+", txt: `Dividendenrendite ${y.toFixed(1)} % — attraktiv` }); }
+    else if (y >= 2) reasons.push({ t: "0", txt: `Dividendenrendite ${y.toFixed(1)} %` });
+    // Sehr hohe Rendite kann auch ein Warnsignal sein (Kursverfall)
+    if (y > 10) { score -= 1; reasons.push({ t: "-", txt: `Rendite ${y.toFixed(1)} % ungewöhnlich hoch — Vorsicht` }); }
+  }
+
+  return { score, reasons, available };
+}
+
+// Positionsbezogene Hinweise (nur wenn im Depot)
+function scorePosition(position, quote) {
+  const reasons = [];
+  if (!position || !quote || !position.avgPrice) return { reasons, available: false };
+  const gainPct = ((quote.price - position.avgPrice) / position.avgPrice) * 100;
+
+  if (gainPct <= -20) reasons.push({ t: "!", txt: `${gainPct.toFixed(1)} % seit Kauf — deutlicher Buchverlust` });
+  else if (gainPct <= -10) reasons.push({ t: "!", txt: `${gainPct.toFixed(1)} % seit Kauf — Buchverlust` });
+  else if (gainPct >= 50) reasons.push({ t: "!", txt: `+${gainPct.toFixed(1)} % seit Kauf — Gewinnmitnahme erwägen?` });
+  else if (gainPct >= 20) reasons.push({ t: "0", txt: `+${gainPct.toFixed(1)} % seit Kauf` });
+
+  return { reasons, available: reasons.length > 0, gainPct };
+}
+
+// Gesamtbewertung — kombiniert alles
+function getSignal(indicators, quote, position) {
+  // Anleihen: Chart-Technik ist hier weitgehend bedeutungslos
+  if (quote?.type === "bond") {
+    const reasons = [];
+    if (quote.dividend > 0 && quote.price > 0) {
+      const currentYield = (quote.dividend / quote.price) * 100;
+      reasons.push({ t: "0", txt: `Kupon ${fmt(quote.dividend)} % · laufende Rendite ${currentYield.toFixed(2)} %` });
+    }
+    reasons.push({ t: "0", txt: "Bei Anleihen sind Kupon, Restlaufzeit und Bonität entscheidend — nicht Chart-Signale." });
+    return {
+      signal: "Anleihe",
+      color: "#f59e0b",
+      icon: "◆",
+      score: 0,
+      reasons,
+      isBond: true
+    };
+  }
+
+  const tech = scoreTechnical(indicators, quote?.price);
+  const fund = scoreFundamental(quote);
+  const pos = scorePosition(position, quote);
+
+  if (!tech.available) {
+    return {
+      signal: "Keine Analyse",
+      color: "#64748b",
+      icon: "—",
+      score: 0,
+      reasons: [{ t: "0", txt: "Zu wenig Kursdaten für eine Analyse." }],
+      noSignal: true
+    };
+  }
+
+  // Technik zählt doppelt (kurzfristig), Fundamental einfach (langfristig)
+  const total = tech.score * 2 + fund.score;
+  const reasons = [...tech.reasons, ...fund.reasons, ...pos.reasons];
+
+  let signal, color, icon;
+  if (total >= 6) { signal = "Stark Kaufen"; color = "#10b981"; icon = "▲▲"; }
+  else if (total >= 2) { signal = "Kaufen"; color = "#34d399"; icon = "▲"; }
+  else if (total <= -6) { signal = "Stark Verkaufen"; color = "#ef4444"; icon = "▼▼"; }
+  else if (total <= -2) { signal = "Verkaufen"; color = "#f87171"; icon = "▼"; }
+  else { signal = "Halten"; color = "#f59e0b"; icon = "●"; }
+
+  return {
+    signal, color, icon,
+    score: total,
+    techScore: tech.score,
+    fundScore: fund.score,
+    hasFundamentals: fund.available,
+    reasons,
+    gainPct: pos.gainPct
+  };
+}
+
 const DEFAULT_PORTFOLIO = [{
   ticker: "SAP.DE",
   shares: 25,
@@ -3047,10 +3258,6 @@ function DividendMonthlyBar({
 }
 
 // ─── Format Helpers ───
-const fmt = (n, dec = 2) => n != null ? n.toLocaleString("de-DE", {
-  minimumFractionDigits: dec,
-  maximumFractionDigits: dec
-}) : "–";
 const fmtCur = (n, cur = "EUR") => n != null ? n.toLocaleString("de-DE", {
   style: "currency",
   currency: cur
@@ -3274,40 +3481,43 @@ function PortfolioApp() {
     // Generate recommendations
     setLoadStatus("Analyse berechnen...");
     const recs = [];
+    const currentPortfolio = saved || DEFAULT_PORTFOLIO;
     Object.entries(q).forEach(([ticker, quote]) => {
       const hist = h[ticker];
-      if (!hist || hist.length < 14) return;
+      const position = currentPortfolio.find(p => p.ticker === ticker);
       // Technische Signale nur bei ECHTEN Kursdaten (live/cache).
-      // Bei Mock/manuellen Kursen ist die History zufallsgeneriert → Signale wären sinnlos.
+      // Bei Mock/manuellen Kursen ist die History zufallsgeneriert → Signale wären irreführend.
       const hasRealHistory = quote.dataQuality === "live" || quote.dataQuality === "cache";
-      if (!hasRealHistory) {
-        recs.push({
-          ticker,
-          ...quote,
-          rsi: null,
-          macd: null,
-          sma20: null,
-          sma50: null,
-          signal: "Keine Analyse",
-          icon: "—",
-          color: "#64748b",
-          noSignal: true
-        });
+
+      if (!hasRealHistory || !hist || hist.length < 15) {
+        const sig = getSignal(null, quote, position);
+        recs.push({ ticker, ...quote, rsi: null, macd: null, sma20: null, sma50: null, ...sig });
         return;
       }
+
       const closes = hist.map(d => d.close);
       const rsi = computeRSI(closes);
-      const macd = closes.length >= 26 ? computeMACD(closes) : 0;
-      const sma20 = computeSMA(closes, Math.min(20, closes.length));
-      const sma50 = computeSMA(closes, Math.min(50, closes.length));
-      const sig = getSignal(rsi, macd, sma20, sma50, quote.price);
+      const macdObj = computeMACD(closes);
+      const sma20 = computeSMA(closes, 20);
+      const sma50 = computeSMA(closes, 50);
+      const bollinger = computeBollinger(closes, 20);
+      const volatility = computeVolatility(closes, 30);
+
+      const indicators = { rsi, macdObj, sma20, sma50, bollinger, volatility };
+      const sig = getSignal(indicators, quote, position);
+
       recs.push({
         ticker,
         ...quote,
         rsi,
-        macd,
+        macd: macdObj?.macd ?? null,
+        macdSignal: macdObj?.signal ?? null,
+        macdHist: macdObj?.histogram ?? null,
+        macdCross: macdObj?.cross ?? null,
         sma20,
         sma50,
+        bollinger,
+        volatility,
         ...sig
       });
     });
@@ -5298,10 +5508,12 @@ function PortfolioApp() {
       }
     }, rec.ticker, " \xB7 ", fmtCur(rec.price, rec.currency))), /*#__PURE__*/React.createElement("span", {
       style: S.badge(rec.color)
-    }, rec.icon, " ", rec.signal)), rec.noSignal
+    }, rec.icon, " ", rec.signal)), (rec.noSignal || rec.isBond)
       ? /*#__PURE__*/React.createElement("div", {
           style: { fontSize: "11px", color: "#64748b", fontStyle: "italic" }
-        }, "Kein Live-Kurs \u2013 keine technische Analyse m\u00F6glich")
+        }, rec.isBond
+            ? "Anleihe \u2013 Kupon und Restlaufzeit sind entscheidend"
+            : "Kein Live-Kurs \u2013 keine technische Analyse m\u00F6glich")
       : /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
@@ -5850,7 +6062,7 @@ function PortfolioApp() {
         fontSize: "14px",
         fontStyle: "italic"
       }
-    }, "Technische Analyse basierend auf RSI, MACD, SMA(20/50) \xB7 Dies ist keine Anlageberatung")), /*#__PURE__*/React.createElement("div", {
+    }, "RSI (Wilder) \u00B7 MACD mit Signallinie \u00B7 SMA(20/50) \u00B7 Bollinger \u00B7 KGV & Dividende. \u2014 Technische Analyse ist wissenschaftlich umstritten und liefert keine verl\u00E4ssliche Prognose. Keine Anlageberatung.")), /*#__PURE__*/React.createElement("div", {
       style: {
         position: "relative",
         minWidth: "240px"
@@ -5954,10 +6166,12 @@ function PortfolioApp() {
           color: "#94a3b8",
           lineHeight: 1.8
         }
-      }, rec.noSignal
+      }, (rec.noSignal || rec.isBond)
         ? /*#__PURE__*/React.createElement("div", {
             style: { fontSize: "11px", color: "#64748b", fontStyle: "italic", lineHeight: 1.5 }
-          }, "\u26A0\uFE0F Kein Live-Kurs", /*#__PURE__*/React.createElement("br", null), "Keine Analyse m\u00F6glich")
+          }, rec.isBond
+              ? ["\u25C6 Anleihe", /*#__PURE__*/React.createElement("br", { key: "br" }), "Kupon & Laufzeit z\u00E4hlen"]
+              : ["\u26A0\uFE0F Kein Live-Kurs", /*#__PURE__*/React.createElement("br", { key: "br" }), "Keine Analyse m\u00F6glich"])
         : /*#__PURE__*/React.createElement(React.Fragment, null,
       /*#__PURE__*/React.createElement("div", null, "RSI: ", /*#__PURE__*/React.createElement("strong", {
         style: {
@@ -6760,11 +6974,12 @@ function PortfolioApp() {
     const sparkData = closes.slice(-60);
     const inPortfolio = portfolio.find(p => p.ticker === ticker);
     const inWatchlist = watchlist.includes(ticker);
-    const rsi = closes.length > 14 ? computeRSI(closes) : null;
-    const macd = closes.length > 26 ? computeMACD(closes) : null;
-    const sma20 = closes.length > 20 ? computeSMA(closes, 20) : null;
-    const sma50 = closes.length > 50 ? computeSMA(closes, 50) : null;
-    const sig = rsi != null ? getSignal(rsi, macd || 0, sma20 || 0, sma50 || 0, q?.price || 0) : null;
+    // Indikatoren aus der bereits berechneten Empfehlung übernehmen (keine Doppelberechnung)
+    const rsi = rec?.rsi ?? null;
+    const macd = rec?.macd ?? null;
+    const sma20 = rec?.sma20 ?? null;
+    const sma50 = rec?.sma50 ?? null;
+    const sig = rec && !rec.noSignal ? rec : null;
     const hv = HV_DATES[ticker];
     if (!q) return null;
     return /*#__PURE__*/React.createElement("div", {
@@ -6906,7 +7121,18 @@ function PortfolioApp() {
         letterSpacing: "1px",
         marginBottom: "10px"
       }
-    }, "Technische Indikatoren"), [["RSI (14)", rsi, rsi != null ? rsi < 30 ? "#34d399" : rsi > 70 ? "#f87171" : "#f59e0b" : "#64748b"], ["MACD", macd != null ? (macd > 0 ? "+" : "") + macd.toFixed(3) : "–", macd > 0 ? "#34d399" : "#f87171"], ["SMA 20", sma20 != null ? fmt(sma20) : "–", q.price > (sma20 || 0) ? "#34d399" : "#f87171"], ["SMA 50", sma50 != null ? fmt(sma50) : "–", (sma20 || 0) > (sma50 || 0) ? "#34d399" : "#f87171"], ["Tageshoch", fmtCur(q.high, q.currency), "#f1f5f9"], ["Tagestief", fmtCur(q.low, q.currency), "#f1f5f9"], ["Vortag", fmtCur(q.prev, q.currency), "#f1f5f9"]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    }, "Technische Indikatoren"), [
+      ["RSI (14)", rsi != null ? fmt(rsi, 1) : "–", rsi != null ? (rsi < 30 ? "#34d399" : rsi > 70 ? "#f87171" : "#f59e0b") : "#64748b"],
+      ["MACD", macd != null ? (macd > 0 ? "+" : "") + fmt(macd, 3) : "–", macd > 0 ? "#34d399" : macd < 0 ? "#f87171" : "#64748b"],
+      ["MACD Signal", rec?.macdSignal != null ? fmt(rec.macdSignal, 3) : "–", "#94a3b8"],
+      ["MACD Histogramm", rec?.macdHist != null ? (rec.macdHist > 0 ? "+" : "") + fmt(rec.macdHist, 3) : "–", rec?.macdHist > 0 ? "#34d399" : "#f87171"],
+      ["SMA 20", sma20 != null ? fmt(sma20) : "–", sma20 != null && q.price > sma20 ? "#34d399" : "#f87171"],
+      ["SMA 50", sma50 != null ? fmt(sma50) : "–", sma20 != null && sma50 != null && sma20 > sma50 ? "#34d399" : "#f87171"],
+      ["Bollinger %B", rec?.bollinger ? fmt(rec.bollinger.pctB, 2) : "–", rec?.bollinger ? (rec.bollinger.pctB > 0.95 ? "#f87171" : rec.bollinger.pctB < 0.05 ? "#34d399" : "#94a3b8") : "#64748b"],
+      ["Volatilität (30T)", rec?.volatility != null ? fmt(rec.volatility, 1) + " %" : "–", rec?.volatility > 40 ? "#f87171" : rec?.volatility > 25 ? "#f59e0b" : "#34d399"],
+      ["Tageshoch", fmtCur(q.high, q.currency), "#f1f5f9"],
+      ["Tagestief", fmtCur(q.low, q.currency), "#f1f5f9"]
+    ].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
       key: i,
       style: {
         display: "flex",
@@ -6924,7 +7150,41 @@ function PortfolioApp() {
         color: color || "#f1f5f9",
         fontWeight: 600
       }
-    }, val))))), inPortfolio && /*#__PURE__*/React.createElement("div", {
+    }, val))))),
+    rec?.reasons?.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#0f172a", borderRadius: "12px", padding: "14px 16px", marginBottom: "20px"
+      }
+    },
+      /*#__PURE__*/React.createElement("div", {
+        style: { fontSize: "11px", color: "#64748b", textTransform: "uppercase", letterSpacing: "1px", marginBottom: "10px" }
+      }, "Wie kommt die Einsch\u00E4tzung zustande?"),
+      rec.reasons.map((r, i) => /*#__PURE__*/React.createElement("div", {
+        key: i,
+        style: {
+          display: "flex", gap: "8px", alignItems: "flex-start",
+          padding: "4px 0", fontSize: "12.5px", lineHeight: 1.5,
+          color: r.t === "+" ? "#34d399" : r.t === "-" ? "#f87171" : r.t === "!" ? "#fbbf24" : "#94a3b8"
+        }
+      },
+        /*#__PURE__*/React.createElement("span", { style: { fontWeight: 700, minWidth: "12px" } },
+          r.t === "+" ? "+" : r.t === "-" ? "\u2212" : r.t === "!" ? "!" : "\u00B7"),
+        /*#__PURE__*/React.createElement("span", null, r.txt)
+      )),
+      rec.score != null && !rec.isBond && !rec.noSignal && /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #1e293b",
+          fontSize: "11px", color: "#64748b", display: "flex", justifyContent: "space-between"
+        }
+      },
+        /*#__PURE__*/React.createElement("span", null, "Gesamt-Score: ", /*#__PURE__*/React.createElement("strong", { style: { color: rec.color } }, rec.score > 0 ? "+" : "", rec.score)),
+        rec.hasFundamentals && /*#__PURE__*/React.createElement("span", null, "Technik ", rec.techScore > 0 ? "+" : "", rec.techScore, " \u00B7 Fundamental ", rec.fundScore > 0 ? "+" : "", rec.fundScore)
+      ),
+      /*#__PURE__*/React.createElement("div", {
+        style: { marginTop: "10px", fontSize: "10.5px", color: "#475569", lineHeight: 1.5, fontStyle: "italic" }
+      }, "\u26A0\uFE0F Technische Analyse ist wissenschaftlich umstritten und liefert keine verl\u00E4ssliche Prognose. Dies ist keine Anlageberatung.")
+    ),
+    inPortfolio && /*#__PURE__*/React.createElement("div", {
       style: {
         background: "#818cf810",
         borderRadius: "12px",
