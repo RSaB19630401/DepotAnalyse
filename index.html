@@ -146,7 +146,7 @@ const fmtEUR = n => n != null ? n.toLocaleString("de-DE", {
 }) : "–";
 
 // ─── Live Data Config ───
-const APP_VERSION = "2026-06-18e";
+const APP_VERSION = "2026-06-18f";
 const WORKER_URL = "https://portfolio-api.rsab1963.workers.dev";
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 min auto-refresh
 const isMarketOpen = () => {
@@ -3101,6 +3101,7 @@ function PortfolioApp() {
   });
   const [selectedDetail, setSelectedDetail] = useState(null); // ticker for detail view
   const [dataSource, setDataSource] = useState("loading"); // "live", "cache", "mock", "loading"
+  const [fxInfo, setFxInfo] = useState({ live: false, timestamp: null, rates: FX_RATES });
   const [loadStatus, setLoadStatus] = useState("App wird initialisiert...");
   const [syncCode, setSyncCode] = useState(() => { try { return localStorage.getItem("pt_sync-code") || ""; } catch { return ""; } });
   const [syncStatus, setSyncStatus] = useState("idle"); // idle, saving, loading, saved, error
@@ -3145,6 +3146,30 @@ function PortfolioApp() {
     const q = {},
       h = {};
     let source = "mock";
+    setLoadStatus("Wechselkurse laden...");
+    // ── Live-Wechselkurse holen (mit Cache-Fallback) ──
+    try {
+      const fxResp = await fetch(`${WORKER_URL}/api/fx`, { signal: AbortSignal.timeout(5000) });
+      if (fxResp.ok) {
+        const fxData = await fxResp.json();
+        if (fxData.rates && Object.keys(fxData.rates).length > 1) {
+          liveFxRates = { ...FX_RATES, ...fxData.rates };
+          setFxInfo({ live: true, timestamp: fxData.timestamp, rates: fxData.rates });
+          await Storage.set("portfolio-fx-cache", { _ts: Date.now(), rates: fxData.rates });
+          console.log("FX rates loaded:", fxData.rates);
+        }
+      }
+    } catch (e) {
+      console.warn("FX fetch failed, trying cache:", e.message);
+      const cachedFx = await Storage.get("portfolio-fx-cache");
+      if (cachedFx?.rates && Date.now() - cachedFx._ts < 7 * 24 * 3600 * 1000) {
+        liveFxRates = { ...FX_RATES, ...cachedFx.rates };
+        setFxInfo({ live: false, timestamp: new Date(cachedFx._ts).toISOString(), rates: cachedFx.rates });
+      } else {
+        setFxInfo({ live: false, timestamp: null, rates: FX_RATES });
+      }
+    }
+
     setLoadStatus(`Kurse für ${liveTickers.length} Werte abrufen...`);
     console.log("Live tickers to fetch:", liveTickers.length, liveTickers.slice(0, 5).join(", "), "...");
 
@@ -3480,7 +3505,7 @@ function PortfolioApp() {
       totalGainPct,
       totalDayChange
     };
-  }, [portfolio, quotes]);
+  }, [portfolio, quotes, fxInfo]);
 
   // Top 5 daily recommendations
   const dailyRecs = useMemo(() => recommendations.slice(0, 5), [recommendations]);
@@ -7016,6 +7041,17 @@ function PortfolioApp() {
       border: `1px solid ${dataSource === "live" ? "#10b98140" : dataSource === "cache" ? "#f59e0b40" : "#ef444440"}`
     }
   }, dataSource === "live" ? "🟢 Live" : dataSource === "cache" ? "🟡 Cache" : "🔴 Mock"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: fxInfo.live ? "#34d399" : "#64748b",
+      cursor: "help"
+    },
+    title: fxInfo.live
+      ? `Live-Wechselkurse (${new Date(fxInfo.timestamp).toLocaleString("de-DE")}):\n` +
+        Object.entries(fxInfo.rates).filter(([c]) => c !== "EUR")
+          .map(([c, r]) => `1 ${c} = ${r.toFixed(4)} EUR`).join("\n")
+      : "Wechselkurse: Fallback-Werte (nicht live)"
+  }, fxInfo.live ? "💱 Live" : "💱 fix"), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: "11px",
       color: "#64748b"
